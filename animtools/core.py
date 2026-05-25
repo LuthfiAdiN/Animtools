@@ -2,7 +2,6 @@ import bpy
 import math
 from mathutils import Matrix
 from typing import Tuple, Union, Optional
-# Import khusus untuk Blender 5.0+ Animation System
 from bpy_extras.anim_utils import action_ensure_channelbag_for_slot
 
 # Global storage
@@ -41,83 +40,68 @@ def get_rotation_mode(entity):
     return "euler"
 
 def insert_keyframe_transform(entity, is_bone: bool, frame: int):
-    data_paths = ["location", f"rotation_{get_rotation_mode(entity)}", "scale"]
+    """Insert location/rotation/scale keyframes. Mirrors dp_keyframe_insert_obj/pbone."""
+    rotation_mode = get_rotation_mode(entity)
+    data_paths = ["location", f"rotation_{rotation_mode}", "scale"]
     if is_bone:
         armature = entity.id_data
         for dp in data_paths:
-            armature.keyframe_insert(data_path=f'pose.bones["{entity.name}"].{dp}', frame=frame)
+            armature.keyframe_insert(
+                data_path=f'pose.bones["{entity.name}"].{dp}', frame=frame
+            )
     else:
         for dp in data_paths:
             entity.keyframe_insert(data_path=dp, frame=frame)
 
 def insert_keyframe_constraint(entity, is_bone: bool, constraint_name: str, frame: int):
+    """Insert influence keyframe on a constraint."""
     if is_bone:
         armature = entity.id_data
         armature.keyframe_insert(
-            data_path=f'pose.bones["{entity.name}"].constraints["{constraint_name}"].influence', 
+            data_path=f'pose.bones["{entity.name}"].constraints["{constraint_name}"].influence',
             frame=frame
         )
     else:
-        entity.keyframe_insert(data_path=f'constraints["{constraint_name}"].influence', frame=frame)
+        entity.keyframe_insert(
+            data_path=f'constraints["{constraint_name}"].influence', frame=frame
+        )
 
-# --- Helper untuk Fitur No. 3: Check Keyframe ---
 def check_constraint_keyframe(entity, is_bone: bool, constraint_name: str, frame: int):
-    """
-    Return icon string if keyframe exists on influence at specific frame.
-    Support Blender 5.0 (Slotted Actions).
-    """
-    # 1. Dapatkan ID Data (Object atau Armature)
+    """Return icon string if keyframe exists on influence at specific frame."""
     id_data = entity.id_data if is_bone else entity
-    
+
     if not id_data.animation_data or not id_data.animation_data.action:
         return 'NONE'
 
     action = id_data.animation_data.action
     slot = id_data.animation_data.action_slot
-    
+
     if not slot:
         return 'NONE'
 
-    # 2. Akses Channelbag (Blender 5.0 way)
-    # Kita perlu mencari channelbag yang sesuai dengan slot
-    channelbag = None
-    # Blender 5.0 API: action.layers... strips... channelbag
-    # Cara aman untuk membaca:
     try:
-        # Karena API masih baru, kita gunakan helper bawaan jika ada, atau manual search
-        # Namun untuk membaca, kita bisa iterate fcurves lama jika ada, atau pakai cara baru
-        # Di Blender 5.0, fcurves bisa diakses via: action.slots[...].channels ??
-        # Cara paling stabil di 5.0 awal adalah:
-        bag = action_ensure_channelbag_for_slot(action, slot) # Ini akan membuat jika tidak ada, tapi ok untuk read
-        # Alternatif read-only tidak ada di public API stabil, jadi kita pakai helper resmi
-    except:
+        bag = action_ensure_channelbag_for_slot(action, slot)
+    except Exception:
         return 'NONE'
-        
-    # 3. Tentukan Data Path
+
     if is_bone:
         data_path = f'pose.bones["{entity.name}"].constraints["{constraint_name}"].influence'
     else:
         data_path = f'constraints["{constraint_name}"].influence'
 
-    # 4. Cari Fcurve di dalam bag
-    # Di Blender 5.0, fcurves ada di dalam channelbag
-    # Perhatian: API mungkin berubah, tapi biasanya .fcurves bisa diakses
-    # Jika tidak, kita kembalikan NONE
-    
-    # Cara backward compatible (aman)
     fcurves = bag.fcurves if hasattr(bag, 'fcurves') else []
-    
+
     for fcu in fcurves:
         if fcu.data_path == data_path:
             for kp in fcu.keyframe_points:
                 if int(kp.co[0]) == frame:
-                    return 'KEYFRAME' # Ikon keyframe
-            return 'DECORATE_ANIMATE' # Ikon ada animasi, tapi bukan di frame ini
-            
+                    return 'KEYFRAME'
+            return 'DECORATE_ANIMATE'
+
     return 'NONE'
 
 # ==========================================
-# TOGGLE LOGIC
+# TOGGLE LOGIC (unchanged)
 # ==========================================
 
 def toggle_child_of_logic(entity, is_bone: bool, constraint_name: str):
@@ -125,157 +109,250 @@ def toggle_child_of_logic(entity, is_bone: bool, constraint_name: str):
     if not con or con.type != 'CHILD_OF':
         return
 
-    # === JARING PENGAMAN ===
-    # Jika constraint tidak punya target, toggle saja tanpa kalkulasi matrix
     if not con.target:
         con.influence = 0.0 if con.influence > 0.5 else 1.0
         return
 
-    # Simpan posisi dunia SEBELUM apapun diubah
     current_world_mat = get_world_matrix(entity, is_bone)
     new_influence = 0.0 if con.influence > 0.5 else 1.0
     con.influence = new_influence
 
     if new_influence == 0.0:
-        # === TOGGLE OFF ===
-        # Constraint dimatikan, kembalikan posisi ke posisi dunia semula
         set_world_matrix(entity, is_bone, current_world_mat)
-
     else:
-        # === TOGGLE ON ===
-        # Kita perlu menghitung: "matrix lokal berapa yang, setelah constraint aktif,
-        # menghasilkan posisi dunia yang SAMA seperti sebelumnya?"
-        #
-        # Rumusnya:
-        # world = effective_parent @ local
-        # Maka: local = effective_parent.inverted() @ world
-
-        # Dapatkan matrix dunia dari parent target
         parent_world = con.target.matrix_world.copy()
         if con.subtarget and con.target.type == 'ARMATURE':
             p_bone = con.target.pose.bones.get(con.subtarget)
             if p_bone:
                 parent_world = parent_world @ p_bone.matrix
 
-        # "Effective parent" = posisi parent di dunia, dikoreksi oleh inverse matrix
-        # (inverse matrix adalah "titik nol" yang direkam saat Set Inverse dijalankan)
         effective_parent = parent_world @ con.inverse_matrix
-
-        # Hitung matrix lokal yang kita butuhkan
         required_local = effective_parent.inverted_safe() @ current_world_mat
-
-        # Terapkan
         set_world_matrix(entity, is_bone, required_local)
 
 # ==========================================
 # DYNAMIC PARENT LOGIC
 # ==========================================
 
-def get_selected_parent(context):
-    active_obj = context.active_object
-    selected_objs = context.selected_objects
-    
-    if active_obj and active_obj.mode == 'OBJECT':
-        for obj in selected_objs:
-            if obj != active_obj:
-                return obj, None
-    
-    if active_obj and active_obj.mode == 'POSE':
-        active_bone = context.active_pose_bone
-        selected_bones = context.selected_pose_bones
-        
-        for bone in selected_bones:
-            if bone != active_bone:
-                return active_obj, bone.name
-        
-        for obj in selected_objs:
-            if obj != active_obj:
-                if obj.type == 'ARMATURE' and obj.data.bones.active:
-                    return obj, obj.data.bones.active.name
-                return obj, None
+def get_last_dynamic_parent_constraint(entity):
+    """
+    Returns the LAST constraint if it's a DP_ constraint with influence == 1.
+    Matches original dynamic_parent.py behaviour exactly.
+    """
+    if not entity.constraints:
+        return None
+    const = entity.constraints[-1]
+    if const.name.startswith("DP_") and const.influence == 1:
+        return const
+    return None
 
-    return None, None
+
+def get_selected_objects(context):
+    """
+    Returns all selected objects/bones with active last.
+    Mirrors get_selected_objects() from dynamic_parent.py.
+    """
+    if context.mode not in ("OBJECT", "POSE"):
+        return []
+
+    if context.mode == "OBJECT":
+        active = context.active_object
+        selected = [obj for obj in context.selected_objects if obj != active]
+    else:
+        active = context.active_pose_bone
+        selected = [bone for bone in context.selected_pose_bones if bone != active]
+
+    selected.append(active)
+    return selected
+
+
+def _dp_create_obj(context, op):
+    """
+    Create Dynamic Parent for a plain Object.
+    Mirrors dp_create_dynamic_parent_obj() from dynamic_parent.py.
+    """
+    obj = context.active_object
+    scn = context.scene
+    list_selected_obj = list(context.selected_objects)
+
+    if len(list_selected_obj) != 2:
+        op.report({'ERROR'}, "Two objects must be selected")
+        return
+
+    i = list_selected_obj.index(obj)
+    list_selected_obj.pop(i)
+    parent_obj = list_selected_obj[0]
+
+    # 1. Keyframe current transform BEFORE adding constraint
+    insert_keyframe_transform(obj, False, scn.frame_current)
+
+    # 2. Add constraint via ops (auto-assigns target)
+    bpy.ops.object.constraint_add_with_targets(type='CHILD_OF')
+    last_con = obj.constraints[-1]
+
+    # 3. Name the constraint
+    if parent_obj.type == 'ARMATURE':
+        last_con.subtarget = parent_obj.data.bones.active.name
+        last_con.name = f"DP_{last_con.target.name}.{last_con.subtarget}"
+    else:
+        last_con.name = f"DP_{last_con.target.name}"
+
+    # 4. Set inverse
+    bpy.ops.constraint.childof_set_inverse(
+        constraint=last_con.name, owner='OBJECT'
+    )
+
+    # 5. Keyframe influence: 0 at frame-1, 1 at current frame
+    current_frame = scn.frame_current
+    scn.frame_current = current_frame - 1
+    obj.constraints[last_con.name].influence = 0
+    obj.keyframe_insert(
+        data_path=f'constraints["{last_con.name}"].influence'
+    )
+
+    scn.frame_current = current_frame
+    obj.constraints[last_con.name].influence = 1
+    obj.keyframe_insert(
+        data_path=f'constraints["{last_con.name}"].influence'
+    )
+
+    # 6. Deselect parent, keep child selected
+    for ob in list_selected_obj:
+        ob.select_set(False)
+    obj.select_set(True)
+
+
+def _dp_create_pbone(context, op):
+    """
+    Create Dynamic Parent for a Pose Bone.
+    Mirrors dp_create_dynamic_parent_pbone() from dynamic_parent.py.
+    """
+    arm = context.active_object
+    pbone = context.active_pose_bone
+    scn = context.scene
+    list_selected_obj = list(context.selected_objects)
+
+    if len(list_selected_obj) == 2:
+        # Parenting to another object / armature
+        i = list_selected_obj.index(arm)
+        list_selected_obj.pop(i)
+        parent_obj = list_selected_obj[0]
+        if parent_obj.type == 'ARMATURE':
+            parent_obj_pbone = parent_obj.data.bones.active
+            if parent_obj_pbone is None:
+                op.report({'ERROR'}, "At least two bones must be selected")
+                return
+        else:
+            parent_obj_pbone = None
+    elif len(list_selected_obj) == 1:
+        # Bone-to-bone within the same armature
+        parent_obj = arm
+        selected_bones = list(context.selected_pose_bones)
+        if pbone in selected_bones:
+            selected_bones.remove(pbone)
+        if not selected_bones:
+            op.report({'ERROR'}, "At least two bones must be selected")
+            return
+        parent_obj_pbone = selected_bones[0]
+    else:
+        op.report({'ERROR'}, "Two objects must be selected")
+        return
+
+    # 1. Keyframe current transform BEFORE adding constraint
+    insert_keyframe_transform(pbone, True, scn.frame_current)
+
+    # 2. Add constraint via ops (auto-assigns target)
+    bpy.ops.pose.constraint_add_with_targets(type='CHILD_OF')
+    last_con = pbone.constraints[-1]
+
+    # 3. Name the constraint
+    if parent_obj.type == 'ARMATURE':
+        last_con.subtarget = parent_obj_pbone.name
+        last_con.name = f"DP_{last_con.target.name}.{last_con.subtarget}"
+    else:
+        last_con.name = f"DP_{last_con.target.name}"
+
+    # 4. Set inverse
+    bpy.ops.constraint.childof_set_inverse(
+        constraint=last_con.name, owner='BONE'
+    )
+
+    # 5. Keyframe influence: 0 at frame-1, 1 at current frame
+    current_frame = scn.frame_current
+    scn.frame_current = current_frame - 1
+    pbone.constraints[last_con.name].influence = 0
+    arm.keyframe_insert(
+        data_path=f'pose.bones["{pbone.name}"].constraints["{last_con.name}"].influence'
+    )
+
+    scn.frame_current = current_frame
+    pbone.constraints[last_con.name].influence = 1
+    arm.keyframe_insert(
+        data_path=f'pose.bones["{pbone.name}"].constraints["{last_con.name}"].influence'
+    )
+
 
 def dynamic_parent_create(context, op):
-    entity, is_bone = get_active_entity(context)
-    if not entity:
+    """
+    Entry point for Create.
+    Mirrors DYNAMIC_PARENT_OT_create.execute() from dynamic_parent.py.
+    """
+    obj = context.active_object
+    if not obj:
         op.report({'ERROR'}, "Nothing selected.")
         return
-    
-    last_con = None
-    for con in entity.constraints:
-        if con.name.startswith("DP_") and con.influence == 1.0:
-            last_con = con
-            break
-    
-    current_frame = context.scene.frame_current
-    
-    if last_con:
-        dynamic_parent_disable(context, entity, is_bone, last_con)
 
-    parent_obj, parent_bone_name = get_selected_parent(context)
-    if not parent_obj:
-        op.report({'ERROR'}, "Select a target parent (object or bone).")
-        return
+    if obj.type == 'ARMATURE':
+        if obj.mode != 'POSE':
+            op.report({'ERROR'}, "Armature objects must be in Pose mode.")
+            return
+        pbone = context.active_pose_bone
+        const = get_last_dynamic_parent_constraint(pbone)
+        if const:
+            dynamic_parent_disable(context, pbone, True, const)
+        _dp_create_pbone(context, op)
+    else:
+        const = get_last_dynamic_parent_constraint(obj)
+        if const:
+            dynamic_parent_disable(context, obj, False, const)
+        _dp_create_obj(context, op)
 
-    insert_keyframe_transform(entity, is_bone, current_frame)
 
-    con = entity.constraints.new('CHILD_OF')
-    dp_name = f"DP_{parent_obj.name}"
-    if parent_bone_name:
-        dp_name += f".{parent_bone_name}"
-    con.name = dp_name
-    
-    con.target = parent_obj
-    if parent_bone_name and parent_obj.type == 'ARMATURE':
-        con.subtarget = parent_bone_name
+def dynamic_parent_disable(context, entity, is_bone: bool, con):
+    """
+    Disable a DP constraint while preserving world position.
+    Mirrors disable_constraint() from dynamic_parent.py exactly:
+      1. Save world matrix
+      2. Keyframe transform + influence at frame-1 (while constraint is still ON)
+      3. Set influence = 0, restore world matrix
+      4. Keyframe transform + influence at current frame (constraint now OFF)
+    """
+    frame = context.scene.frame_current
 
-    # SET INVERSE FIX
-    try:
-        if is_bone:
-            armature = entity.id_data
-            with context.temp_override(object=armature, active_pose_bone=entity):
-                bpy.ops.constraint.childof_set_inverse(constraint=con.name, owner='BONE')
-        else:
-            with context.temp_override(object=entity):
-                bpy.ops.constraint.childof_set_inverse(constraint=con.name, owner='OBJECT')
-    except Exception as e:
-        print(f"Error Set Inverse: {e}")
-        child_world = get_world_matrix(entity, is_bone)
-        parent_world = parent_obj.matrix_world.copy()
-        if parent_bone_name:
-             p_bone = parent_obj.pose.bones.get(parent_bone_name)
-             if p_bone:
-                parent_world = parent_world @ p_bone.matrix
-        con.inverse_matrix = parent_world.inverted_safe() @ child_world
+    # Save world matrix BEFORE touching anything
+    matrix_final = get_world_matrix(entity, is_bone)
 
-    prev_frame = current_frame - 1
-    
+    # Keyframe the "before" state at frame-1
+    insert_keyframe_transform(entity, is_bone, frame - 1)
+    insert_keyframe_constraint(entity, is_bone, con.name, frame - 1)
+
+    # Disable constraint and snap back to saved world position
     con.influence = 0.0
-    insert_keyframe_constraint(entity, is_bone, con.name, prev_frame)
-    
-    con.influence = 1.0
-    insert_keyframe_constraint(entity, is_bone, con.name, current_frame)
-    
-    op.report({'INFO'}, f"Created Dynamic Parent: {con.name}")
+    set_world_matrix(entity, is_bone, matrix_final)
 
-def dynamic_parent_disable(context, entity, is_bone, con):
-    current_frame = context.scene.frame_current
-    prev_frame = current_frame - 1
-    
-    con.influence = 1.0
-    insert_keyframe_constraint(entity, is_bone, con.name, prev_frame)
-    
-    insert_keyframe_transform(entity, is_bone, prev_frame)
-    
-    con.influence = 0.0
-    insert_keyframe_constraint(entity, is_bone, con.name, current_frame)
-    
-    insert_keyframe_transform(entity, is_bone, current_frame)
+    # Keyframe the "after" state at current frame
+    insert_keyframe_transform(entity, is_bone, frame)
+    insert_keyframe_constraint(entity, is_bone, con.name, frame)
 
-def dynamic_parent_clear(entity, is_bone):
-    frames_to_clean = []
+
+def dynamic_parent_clear(entity, is_bone: bool):
+    """
+    Remove all DP_ constraints and clean up their keyframes.
+    Mirrors dp_clear() from dynamic_parent.py.
+    """
     id_data = entity.id_data if is_bone else entity
+
+    # If no animation data, just remove constraints
     if not id_data.animation_data or not id_data.animation_data.action:
         for con in entity.constraints[:]:
             if con.name.startswith("DP_"):
@@ -284,7 +361,7 @@ def dynamic_parent_clear(entity, is_bone):
 
     action = id_data.animation_data.action
     slot = id_data.animation_data.action_slot if id_data.animation_data.action_slot else None
-    
+
     if not slot:
         for con in entity.constraints[:]:
             if con.name.startswith("DP_"):
@@ -292,37 +369,53 @@ def dynamic_parent_clear(entity, is_bone):
         return
 
     channelbag = action_ensure_channelbag_for_slot(action, slot)
-    
+
+    # Collect all DP fcurves and the frames they touch
     dp_curves = []
+    dp_keys = []
     for fcurve in channelbag.fcurves:
         if "DP_" in fcurve.data_path:
             dp_curves.append(fcurve)
             for kp in fcurve.keyframe_points:
-                frames_to_clean.append(int(kp.co[0]))
-    
-    frames_to_clean = list(set(frames_to_clean))
-    
-    prefix = f'pose.bones["{entity.name}"].' if is_bone else ""
-    paths = ["location", "rotation_euler", "rotation_quaternion", "scale"]
-    
-    for fcurve in channelbag.fcurves[:]:
-        is_transform = False
-        for p in paths:
-            if prefix + p in fcurve.data_path:
-                is_transform = True
-                break
-        
-        if is_transform:
-            for kp in fcurve.keyframe_points[:]:
-                if int(kp.co[0]) in frames_to_clean:
-                    fcurve.keyframe_points.remove(kp)
-            
-            if len(fcurve.keyframe_points) == 0:
-                channelbag.fcurves.remove(fcurve)
+                dp_keys.append(kp.co[0])
 
+    dp_keys = list(set(dp_keys))
+    dp_keys.sort()
+
+    # Build prefix for bone data paths
+    prefix = f'pose.bones["{entity.name}"].' if is_bone else ""
+    transform_suffixes = [
+        "location",
+        "rotation_euler",
+        "rotation_quaternion",
+        "rotation_axis_angle",
+        "scale",
+    ]
+
+    # Remove transform keyframes at DP frames, drop empty curves
+    for fcurve in channelbag.fcurves[:]:
+        if fcurve in dp_curves:
+            continue  # handled separately below
+
+        is_transform = any(
+            fcurve.data_path == prefix + s for s in transform_suffixes
+        )
+        if not is_transform:
+            continue
+
+        for frame in dp_keys:
+            for kp in fcurve.keyframe_points[:]:
+                if kp.co[0] == frame:
+                    fcurve.keyframe_points.remove(kp)
+
+        if not fcurve.keyframe_points:
+            channelbag.fcurves.remove(fcurve)
+
+    # Remove DP constraint fcurves
     for fcurve in dp_curves:
         channelbag.fcurves.remove(fcurve)
 
+    # Remove DP constraints
     for con in entity.constraints[:]:
         if con.name.startswith("DP_"):
             entity.constraints.remove(con)
