@@ -1,4 +1,4 @@
-# AnimTools 0.4.1
+# AnimTools 0.1.0
 
 Animation utilities for Blender 5.0+ (tested on 5.0.1, 5.2 and 5.3). Everything lives in the 3D Viewport sidebar,
 tab **Animation > AnimTools**, plus a Playblast button in the Dope Sheet / Timeline / Action Editor header.
@@ -46,6 +46,7 @@ Blender 5.0+: Edit > Preferences > Get Extensions > (v) menu > **Install from Di
 - Foot Lock is an independent implementation of the idea used by Mad Animation Tools' foot lock (GPL-3.0-or-later);
   the library follows the file format of Mad Library. The Dynamic Parent workflow follows the behaviour of the
   community "Dynamic Parent" add-on.
+- This add-on is inspired by mad art tools, raha tools and animo
 
 ## License
 
