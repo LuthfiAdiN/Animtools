@@ -1,0 +1,19 @@
+schema_version = "1.0.0"
+
+id = "animtools"
+version = "0.4.1"
+name = "AnimTools"
+tagline = "Parent rig, foot lock, pose library, rotation mode, playblast"
+maintainer = "LuthfiAdiN"
+type = "add-on"
+
+blender_version_min = "5.0.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+tags = ["Animation", "Rigging", "3D View"]
+
+[permissions]
+files = "Save playblast videos and the pose library to disk"
